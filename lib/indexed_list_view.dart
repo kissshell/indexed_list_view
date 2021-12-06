@@ -323,7 +323,7 @@ class IndexedScrollControllerGroup {
   }
 
   /// Creates a new controller that is linked to any existing ones.
-  ScrollController addAndGet() {
+  IndexedScrollController addAndGet() {
     final initialScrollOffset = _attachedControllers.isEmpty
         ? 0.0
         : _attachedControllers.first.position.pixels;
