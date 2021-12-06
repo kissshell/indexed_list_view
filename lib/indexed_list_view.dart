@@ -195,6 +195,7 @@ class _IndexedListViewState extends State<IndexedListView> {
           // Build negative [ScrollPosition] for the negative scrolling [Viewport].
           final state = Scrollable.of(context)!;
           final negativeOffset = _IndexedScrollPosition(
+            widget.controller,
             physics: scrollPhysics,
             context: state,
             initialPixels: -offset.pixels,
@@ -290,6 +291,113 @@ class _AlwaysScrollableScrollPhysics extends ScrollPhysics {
 
 // -------------------------------------------------------------------------------------------------
 
+/// Sets up a collection of scroll controllers that mirror their movements to
+/// each other.
+///
+/// Controllers are added and returned via [addAndGet]. The initial offset
+/// of the newly created controller is synced to the current offset.
+/// Controllers must be `dispose`d when no longer in use to prevent memory
+/// leaks and performance degradation.
+///
+/// If controllers are disposed over the course of the lifetime of this
+/// object the corresponding scrollables should be given unique keys.
+/// Without the keys, Flutter may reuse a controller after it has been disposed,
+/// which can cause the controller offsets to fall out of sync.
+class IndexedScrollControllerGroup {
+  IndexedScrollControllerGroup() {
+    _offsetNotifier = _IndexedScrollControllerGroupOffsetNotifier(this);
+  }
+
+  final _allControllers = <IndexedScrollController>[];
+
+  late _IndexedScrollControllerGroupOffsetNotifier _offsetNotifier;
+
+  /// The current scroll offset of the group.
+  double get offset {
+    assert(
+    _attachedControllers.isNotEmpty,
+    'LinkedScrollControllerGroup does not have any scroll controllers '
+        'attached.',
+    );
+    return _attachedControllers.first.offset;
+  }
+
+  /// Creates a new controller that is linked to any existing ones.
+  ScrollController addAndGet() {
+    final initialScrollOffset = _attachedControllers.isEmpty
+        ? 0.0
+        : _attachedControllers.first.position.pixels;
+    final controller =
+    IndexedScrollController(this, initialScrollOffset: initialScrollOffset);
+    _allControllers.add(controller);
+    controller.addListener(_offsetNotifier.notifyListeners);
+    return controller;
+  }
+
+  /// Adds a callback that will be called when the value of [offset] changes.
+  void addOffsetChangedListener(VoidCallback onChanged) {
+    _offsetNotifier.addListener(onChanged);
+  }
+
+  /// Removes the specified offset changed listener.
+  void removeOffsetChangedListener(VoidCallback listener) {
+    _offsetNotifier.removeListener(listener);
+  }
+
+  Iterable<IndexedScrollController> get _attachedControllers =>
+      _allControllers.where((controller) => controller.hasClients);
+
+  /// Animates the scroll position of all linked controllers to [offset].
+  Future<void> animateTo(
+      double offset, {
+        required Curve curve,
+        required Duration duration,
+      }) async {
+    final animations = <Future<void>>[];
+    for (final controller in _attachedControllers) {
+      animations
+          .add(controller.animateTo(offset, duration: duration, curve: curve));
+    }
+    return Future.wait<void>(animations).then<void>((List<void> _) => null);
+  }
+
+  /// Jumps the scroll position of all linked controllers to [value].
+  void jumpTo(double value) {
+    for (final controller in _attachedControllers) {
+      controller.jumpTo(value);
+    }
+  }
+
+  /// Resets the scroll position of all linked controllers to 0.
+  void resetScroll() {
+    jumpTo(0.0);
+  }
+}
+
+/// This class provides change notification for [LinkedScrollControllerGroup]'s
+/// scroll offset.
+///
+/// This change notifier de-duplicates change events by only firing listeners
+/// when the scroll offset of the group has changed.
+class _IndexedScrollControllerGroupOffsetNotifier extends ChangeNotifier {
+  _IndexedScrollControllerGroupOffsetNotifier(this.controllerGroup);
+
+  final IndexedScrollControllerGroup controllerGroup;
+
+  /// The cached offset for the group.
+  ///
+  /// This value will be used in determining whether to notify listeners.
+  double? _cachedOffset;
+
+  @override
+  void notifyListeners() {
+    final currentOffset = controllerGroup.offset;
+    if (currentOffset != _cachedOffset) {
+      _cachedOffset = currentOffset;
+      super.notifyListeners();
+    }
+  }
+}
 /// Provides scroll with infinite bounds, and keeps a scroll-position and a origin-index.
 /// The scroll-position is the number of pixels of scroll, considering the item at origin-index
 /// as the origin (0.0). So, for example, if you have scroll-position 10.0 and origin-index 15,
@@ -300,6 +408,8 @@ class _AlwaysScrollableScrollPhysics extends ScrollPhysics {
 /// and [IndexedScrollController.animateToIndex].
 ///
 class IndexedScrollController extends ScrollController {
+  final IndexedScrollControllerGroup _controllerGroup;
+
   //
   final int initialIndex;
 
@@ -309,11 +419,16 @@ class IndexedScrollController extends ScrollController {
   int get originIndex => _originIndex;
 
   @override
-  double get initialScrollOffset => _initialScrollOffset ?? super.initialScrollOffset;
+  double get initialScrollOffset => _controllerGroup._attachedControllers.isEmpty
+      ? super.initialScrollOffset
+      : _controllerGroup.offset;
 
-  double? _initialScrollOffset;
+  // @override
+  // double get initialScrollOffset => _initialScrollOffset ?? super.initialScrollOffset;
+  //
+  // double? _initialScrollOffset;
 
-  IndexedScrollController({
+  IndexedScrollController(this._controllerGroup, {
     this.initialIndex = 0,
     double initialScrollOffset = 0.0,
     bool keepScrollOffset = true,
@@ -338,7 +453,7 @@ class IndexedScrollController extends ScrollController {
     // If we changed the origin, go to its offset position.
     else {
       _originIndex = index;
-      _initialScrollOffset = offset;
+      // _initialScrollOffset = offset;
 
       // Notify is enough. The key will change,
       // and the offset will revert to _initialScrollOffset),
@@ -480,9 +595,29 @@ class IndexedScrollController extends ScrollController {
   }
 
   @override
+  void dispose() {
+    _controllerGroup._allControllers.remove(this);
+    super.dispose();
+  }
+
+  @override
+  void attach(ScrollPosition position) {
+    assert(
+    position is _IndexedScrollPosition,
+    '_LinkedScrollControllers can only be used with'
+        ' _IndexedScrollPositions.');
+    final _IndexedScrollPosition linkedPosition =
+    position as _IndexedScrollPosition;
+    assert(linkedPosition.owner == this,
+    '_IndexedScrollPosition cannot change controllers once created.');
+    super.attach(position);
+  }
+
+  @override
   ScrollPosition createScrollPosition(
       ScrollPhysics physics, ScrollContext context, ScrollPosition? oldPosition) {
     return _IndexedScrollPosition(
+      this,
       physics: physics,
       context: context,
       initialPixels: initialScrollOffset,
@@ -491,12 +626,38 @@ class IndexedScrollController extends ScrollController {
       debugLabel: debugLabel,
     );
   }
+
+
+  @override
+  _IndexedScrollPosition get position => super.position as _IndexedScrollPosition;
+
+  Iterable<IndexedScrollController> get _allPeersWithClients =>
+      _controllerGroup._attachedControllers.where((peer) => peer != this);
+
+  bool get canLinkWithPeers => _allPeersWithClients.isNotEmpty;
+
+  Iterable<_IndexedScrollActivity> linkWithPeers(_IndexedScrollPosition driver) {
+    assert(canLinkWithPeers);
+    return _allPeersWithClients
+        .map((peer) => peer.link(driver))
+        .expand((e) => e);
+  }
+
+  Iterable<_IndexedScrollActivity> link(_IndexedScrollPosition driver) {
+    assert(hasClients);
+    final activities = <_IndexedScrollActivity>[];
+    for (final position in positions) {
+      final linkedPosition = position as _IndexedScrollPosition;
+      activities.add(linkedPosition.link(driver));
+    }
+    return activities;
+  }
 }
 
 // -------------------------------------------------------------------------------------------------
 
 class _IndexedScrollPosition extends ScrollPositionWithSingleContext {
-  _IndexedScrollPosition({
+  _IndexedScrollPosition(this.owner, {
     required ScrollPhysics physics,
     required ScrollContext context,
     double initialPixels = 0.0,
@@ -512,6 +673,8 @@ class _IndexedScrollPosition extends ScrollPositionWithSingleContext {
           debugLabel: debugLabel,
         );
 
+  final IndexedScrollController owner;
+
   void _forceNegativePixels(double offset) {
     super.forcePixels(-offset);
   }
@@ -521,6 +684,168 @@ class _IndexedScrollPosition extends ScrollPositionWithSingleContext {
 
   @override
   double get maxScrollExtent => double.infinity;
+
+  final Set<_IndexedScrollActivity> _peerActivities = <_IndexedScrollActivity>{};
+
+  // We override hold to propagate it to all peer controllers.
+  @override
+  ScrollHoldController hold(VoidCallback holdCancelCallback) {
+    for (final controller in owner._allPeersWithClients) {
+      controller.position._holdInternal();
+    }
+    return super.hold(holdCancelCallback);
+  }
+
+  // Calls hold without propagating to peers.
+  void _holdInternal() {
+    super.hold(() {});
+  }
+
+  @override
+  void beginActivity(ScrollActivity? newActivity) {
+    if (newActivity == null) {
+      return;
+    }
+    for (var activity in _peerActivities) {
+      activity.unlink(this);
+    }
+
+    _peerActivities.clear();
+
+    super.beginActivity(newActivity);
+  }
+
+  @override
+  double setPixels(double newPixels) {
+    if (newPixels == pixels) {
+      return 0.0;
+    }
+    updateUserScrollDirection(newPixels - pixels > 0.0
+        ? ScrollDirection.forward
+        : ScrollDirection.reverse);
+
+    if (owner.canLinkWithPeers) {
+      _peerActivities.addAll(owner.linkWithPeers(this));
+      for (var activity in _peerActivities) {
+        activity.moveTo(newPixels);
+      }
+    }
+
+    return setPixelsInternal(newPixels);
+  }
+
+  double setPixelsInternal(double newPixels) {
+    return super.setPixels(newPixels);
+  }
+
+  @override
+  void forcePixels(double value) {
+    if (value == pixels) {
+      return;
+    }
+    updateUserScrollDirection(value - pixels > 0.0
+        ? ScrollDirection.forward
+        : ScrollDirection.reverse);
+
+    if (owner.canLinkWithPeers) {
+      _peerActivities.addAll(owner.linkWithPeers(this));
+      for (var activity in _peerActivities) {
+        activity.jumpTo(value);
+      }
+    }
+
+    forcePixelsInternal(value);
+  }
+
+  void forcePixelsInternal(double value) {
+    super.forcePixels(value);
+  }
+
+  _IndexedScrollActivity link(_IndexedScrollPosition driver) {
+    if (this.activity is! _IndexedScrollActivity) {
+      beginActivity(_IndexedScrollActivity(this));
+    }
+    final _IndexedScrollActivity activity =
+    this.activity as _IndexedScrollActivity;
+    activity.link(driver);
+    return activity;
+  }
+
+  void unlink(_IndexedScrollActivity activity) {
+    _peerActivities.remove(activity);
+  }
+
+  // We override this method to make it public (overridden method is protected)
+  @override
+  void updateUserScrollDirection(ScrollDirection value) {
+    super.updateUserScrollDirection(value);
+  }
+
+  @override
+  void debugFillDescription(List<String> description) {
+    super.debugFillDescription(description);
+    description.add('owner: $owner');
+  }
 }
 
 // -------------------------------------------------------------------------------------------------
+
+class _IndexedScrollActivity extends ScrollActivity {
+  _IndexedScrollActivity(_IndexedScrollPosition delegate) : super(delegate);
+
+  @override
+  _IndexedScrollPosition get delegate => super.delegate as _IndexedScrollPosition;
+
+  final Set<_IndexedScrollPosition> drivers = <_IndexedScrollPosition>{};
+
+  void link(_IndexedScrollPosition driver) {
+    drivers.add(driver);
+  }
+
+  void unlink(_IndexedScrollPosition driver) {
+    drivers.remove(driver);
+    if (drivers.isEmpty) {
+      delegate.goIdle();
+    }
+  }
+
+  @override
+  bool get shouldIgnorePointer => true;
+
+  @override
+  bool get isScrolling => true;
+
+  // _IndexedScrollActivity is not self-driven but moved by calls to the [moveTo]
+  // method.
+  @override
+  double get velocity => 0.0;
+
+  void moveTo(double newPixels) {
+    _updateUserScrollDirection();
+    delegate.setPixelsInternal(newPixels);
+  }
+
+  void jumpTo(double newPixels) {
+    _updateUserScrollDirection();
+    delegate.forcePixelsInternal(newPixels);
+  }
+
+  void _updateUserScrollDirection() {
+    assert(drivers.isNotEmpty);
+    ScrollDirection commonDirection = drivers.first.userScrollDirection;
+    for (var driver in drivers) {
+      if (driver.userScrollDirection != commonDirection) {
+        commonDirection = ScrollDirection.idle;
+      }
+    }
+    delegate.updateUserScrollDirection(commonDirection);
+  }
+
+  @override
+  void dispose() {
+    for (var driver in drivers) {
+      driver.unlink(this);
+    }
+    super.dispose();
+  }
+}
