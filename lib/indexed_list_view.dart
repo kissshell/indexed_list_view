@@ -34,7 +34,7 @@ class IndexedListView extends StatefulWidget {
   })  : separated = false,
         positiveChildrenDelegate = SliverChildBuilderDelegate(
           (BuildContext context, int index) {
-            var _index = index + controller._originIndex;
+            var _index = index + controller.originIndex;
             if ((minItemCount != null && _index < minItemCount) ||
                 (maxItemCount != null && _index > maxItemCount))
               return emptyItemBuilder(context, _index);
@@ -46,7 +46,7 @@ class IndexedListView extends StatefulWidget {
         ),
         negativeChildrenDelegate = SliverChildBuilderDelegate(
           (BuildContext context, int index) {
-            var _index = -1 - index + controller._originIndex;
+            var _index = -1 - index + controller.originIndex;
             if ((minItemCount != null && _index < minItemCount) ||
                 (maxItemCount != null && _index > maxItemCount))
               return emptyItemBuilder(context, _index);
@@ -78,7 +78,7 @@ class IndexedListView extends StatefulWidget {
         itemExtent = null,
         positiveChildrenDelegate = SliverChildBuilderDelegate(
           (BuildContext context, int index) {
-            final _index = (index ~/ 2) + controller._originIndex;
+            final _index = (index ~/ 2) + controller.originIndex;
             if ((minItemCount != null && _index < minItemCount) ||
                 (maxItemCount != null && _index > maxItemCount))
               return emptyItemBuilder(context, _index);
@@ -92,7 +92,7 @@ class IndexedListView extends StatefulWidget {
         ),
         negativeChildrenDelegate = SliverChildBuilderDelegate(
           (BuildContext context, int index) {
-            final _index = ((-1 - index) ~/ 2) + controller._originIndex;
+            final _index = ((-1 - index) ~/ 2) + controller.originIndex;
             if ((minItemCount != null && _index < minItemCount) ||
                 (maxItemCount != null && _index > maxItemCount))
               return emptyItemBuilder(context, _index);
@@ -186,7 +186,7 @@ class _IndexedListViewState extends State<IndexedListView> {
     final scrollPhysics = widget.physics ?? const _AlwaysScrollableScrollPhysics();
     return Scrollable(
       // Rebuild everything when the originIndex changes.
-      key: ValueKey(widget.controller._originIndex),
+      key: ValueKey(widget.controller.originIndex),
       axisDirection: axisDirection,
       controller: widget.controller,
       physics: scrollPhysics,
@@ -322,14 +322,20 @@ class IndexedScrollControllerGroup {
     return _attachedControllers.first.offset;
   }
 
+  double? _initialScrollOffset;
+
+  /// the origin-index changes as the list jumps by index.
+  int _originIndex = 0;
+
   /// Creates a new controller that is linked to any existing ones.
   IndexedScrollController addAndGet() {
-    final initialScrollOffset = _attachedControllers.isEmpty
+    _initialScrollOffset = _attachedControllers.isEmpty
         ? 0.0
         : _attachedControllers.first.position.pixels;
     final controller =
-    IndexedScrollController(this, initialScrollOffset: initialScrollOffset);
+    IndexedScrollController(this, initialScrollOffset: _initialScrollOffset!);
     _allControllers.add(controller);
+    // controllerGroup在监听各个controller
     controller.addListener(_offsetNotifier.notifyListeners);
     return controller;
   }
@@ -372,6 +378,111 @@ class IndexedScrollControllerGroup {
   void resetScroll() {
     jumpTo(0.0);
   }
+
+  /// Jumps the origin-index to the given [index], and the scroll-position to [offset],
+  /// without animation, and without checking if the new value is in range.
+  ///
+  /// Any active animation is canceled. If the user is currently scrolling, that
+  /// action is canceled.
+  /// TODO 除了通知当前controller的listener，还要通知peer controller
+  void jumpToIndexAndOffset({required int index, required double offset}) {
+    // If we didn't change the origin-index, go to its offset position.
+    if (_originIndex == index) {
+      jumpTo(offset);
+    }
+    // If we changed the origin, go to its offset position.
+    else {
+      _originIndex = index;
+      _initialScrollOffset = offset;
+
+      // Notify is enough. The key will change,
+      // and the offset will revert to _initialScrollOffset),
+      for (final controller in _attachedControllers) {
+        controller.indexChanged();
+      }
+    }
+  }
+
+  /// Jumps the origin-index to the given [index], and the scroll-position to 0.0,
+  /// without animation, and without checking if the new value is in range.
+  ///
+  /// Any active animation is canceled. If the user is currently scrolling, that
+  /// action is canceled.
+  void jumpToIndex(int index) {
+    jumpToIndexAndOffset(index: index, offset: 0.0);
+  }
+
+  /// If the current origin-index is already the same as the given [index],
+  /// animates the position from its current value to the [offset] position
+  /// relative to the origin-index.
+  ///
+  /// The returned [Future] will complete when the animation ends, whether it
+  /// completed successfully or whether it was interrupted prematurely.
+  ///
+  /// However, if the current origin-index is different from the given [index],
+  /// this will jump to the new index, without any animation.
+  Future<void> animateToIndexAndOffset({
+    required int index,
+    required double offset,
+    Duration duration = const Duration(milliseconds: 750),
+    Curve curve = Curves.decelerate,
+  }) async {
+    // If we didn't change origin, go to its 0.0 position.
+    if (_originIndex == index) {
+      _originIndex = index;
+      return animateTo(offset, duration: duration, curve: curve);
+    }
+    // If we changed the origin, jump to the index and offset.
+    else {
+      jumpToIndexAndOffset(index: index, offset: offset);
+    }
+  }
+
+  /// If the current origin-index is already the same as the given [index],
+  /// animates the position from its current value to the 0.0 position
+  /// relative to the origin-index.
+  ///
+  /// The returned [Future] will complete when the animation ends, whether it
+  /// completed successfully or whether it was interrupted prematurely.
+  ///
+  /// However, if the current origin-index is different from the given [index],
+  /// this will jump to the new position, without any animation.
+  Future<void> animateToIndex(
+      int index, {
+        Duration duration = const Duration(milliseconds: 750),
+        Curve curve = Curves.decelerate,
+      }) {
+    return animateToIndexAndOffset(index: index, offset: 0.0, duration: duration, curve: curve);
+  }
+
+
+  /// Same as [jumpTo] but will keep the current origin-index.
+  void jumpToWithSameOriginIndex(double offset) {
+    return jumpTo(offset);
+  }
+
+  /// Same as [animateTo] but will keep the current origin-index.
+  Future<void> animateToWithSameOriginIndex(
+      double offset, {
+        Duration duration = const Duration(milliseconds: 750),
+        Curve curve = Curves.decelerate,
+      }) {
+    return animateTo(offset, duration: duration, curve: curve);
+  }
+
+  /// Same as [jumpTo] but will move [offset] from the current position.
+  void jumpToRelative(double offset) {
+    return jumpTo(this.offset + offset);
+  }
+
+  /// Same as [animateTo] but will move [offset] from the current position.
+  Future<void> animateToRelative(
+      double offset, {
+        Duration duration = const Duration(milliseconds: 750),
+        Curve curve = Curves.decelerate,
+      }) {
+    return animateTo(this.offset + offset, duration: duration, curve: curve);
+  }
 }
 
 /// This class provides change notification for [LinkedScrollControllerGroup]'s
@@ -410,194 +521,32 @@ class _IndexedScrollControllerGroupOffsetNotifier extends ChangeNotifier {
 class IndexedScrollController extends ScrollController {
   final IndexedScrollControllerGroup _controllerGroup;
 
-  //
   final int initialIndex;
 
-  /// the origin-index changes as the list jumps by index.
-  int _originIndex = 0;
-
-  int get originIndex => _originIndex;
+  int get originIndex => _controllerGroup._originIndex;
 
   @override
-  double get initialScrollOffset => _controllerGroup._attachedControllers.isEmpty
-      ? super.initialScrollOffset
-      : _controllerGroup.offset;
-
-  // @override
-  // double get initialScrollOffset => _initialScrollOffset ?? super.initialScrollOffset;
-  //
-  // double? _initialScrollOffset;
+  double get initialScrollOffset => _controllerGroup._initialScrollOffset ?? super.initialScrollOffset;
 
   IndexedScrollController(this._controllerGroup, {
     this.initialIndex = 0,
     double initialScrollOffset = 0.0,
     bool keepScrollOffset = true,
     String? debugLabel,
-  })  : _originIndex = initialIndex,
-        super(
+  })  : super(
           initialScrollOffset: initialScrollOffset,
           keepScrollOffset: keepScrollOffset,
           debugLabel: debugLabel,
         );
 
-  /// Jumps the origin-index to the given [index], and the scroll-position to [offset],
-  /// without animation, and without checking if the new value is in range.
-  ///
-  /// Any active animation is canceled. If the user is currently scrolling, that
-  /// action is canceled.
-  void jumpToIndexAndOffset({required int index, required double offset}) {
-    // If we didn't change the origin-index, go to its offset position.
-    if (_originIndex == index) {
-      super.jumpTo(offset);
-    }
-    // If we changed the origin, go to its offset position.
-    else {
-      _originIndex = index;
-      // _initialScrollOffset = offset;
-
-      // Notify is enough. The key will change,
-      // and the offset will revert to _initialScrollOffset),
-      notifyListeners();
-    }
-  }
-
-  /// Jumps the origin-index to the given [index], and the scroll-position to 0.0,
-  /// without animation, and without checking if the new value is in range.
-  ///
-  /// Any active animation is canceled. If the user is currently scrolling, that
-  /// action is canceled.
-  void jumpToIndex(int index) {
-    jumpToIndexAndOffset(index: index, offset: 0.0);
-  }
-
-  /// If the current origin-index is already the same as the given [index],
-  /// animates the position from its current value to the [offset] position
-  /// relative to the origin-index.
-  ///
-  /// The returned [Future] will complete when the animation ends, whether it
-  /// completed successfully or whether it was interrupted prematurely.
-  ///
-  /// However, if the current origin-index is different from the given [index],
-  /// this will jump to the new index, without any animation.
-  Future<void> animateToIndexAndOffset({
-    required int index,
-    required double offset,
-    Duration duration = const Duration(milliseconds: 750),
-    Curve curve = Curves.decelerate,
-  }) async {
-    // If we didn't change origin, go to its 0.0 position.
-    if (_originIndex == index) {
-      _originIndex = index;
-      return super.animateTo(offset, duration: duration, curve: curve);
-    }
-    // If we changed the origin, jump to the index and offset.
-    else {
-      jumpToIndexAndOffset(index: index, offset: offset);
-    }
-  }
-
-  /// If the current origin-index is already the same as the given [index],
-  /// animates the position from its current value to the 0.0 position
-  /// relative to the origin-index.
-  ///
-  /// The returned [Future] will complete when the animation ends, whether it
-  /// completed successfully or whether it was interrupted prematurely.
-  ///
-  /// However, if the current origin-index is different from the given [index],
-  /// this will jump to the new position, without any animation.
-  Future<void> animateToIndex(
-    int index, {
-    Duration duration = const Duration(milliseconds: 750),
-    Curve curve = Curves.decelerate,
-  }) {
-    return animateToIndexAndOffset(index: index, offset: 0.0, duration: duration, curve: curve);
-  }
-
-  /// Goes to origin-index 0,
-  /// and then jumps the scroll position from its current value to the given [offset],
-  /// without animation, and without checking if the new value is in range.
-  ///
-  /// Any active animation is canceled. If the user is currently scrolling, that
-  /// action is canceled.
-  ///
-  /// If this method changes the scroll position, a sequence of start/update/end
-  /// scroll notifications will be dispatched. No overscroll notifications can
-  /// be generated by this method.
-  ///
-  /// Immediately after the jump, a ballistic activity is started, in case the
-  /// value was out of range.
-  @override
-  void jumpTo(double offset) {
-    jumpToIndexAndOffset(index: 0, offset: offset);
-  }
-
-  /// Goes to origin-index 0,
-  /// and then animates the position from its current value to the given [offset].
-  ///
-  /// Any active animation is canceled. If the user is currently scrolling, that
-  /// action is canceled.
-  ///
-  /// The returned [Future] will complete when the animation ends, whether it
-  /// completed successfully or whether it was interrupted prematurely.
-  ///
-  /// An animation will be interrupted whenever the user attempts to scroll
-  /// manually, or whenever another activity is started, or whenever the
-  /// animation reaches the edge of the viewport and attempts to overscroll. (If
-  /// the [ScrollPosition] does not overscroll but instead allows scrolling
-  /// beyond the extents, then going beyond the extents will not interrupt the
-  /// animation.)
-  ///
-  /// The animation is indifferent to changes to the viewport or content
-  /// dimensions.
-  ///
-  /// Once the animation has completed, the scroll position will attempt to
-  /// begin a ballistic activity in case its value is not stable (for example,
-  /// if it is scrolled beyond the extents and in that situation the scroll
-  /// position would normally bounce back).
-  ///
-  /// The duration must not be zero. To jump to a particular value without an
-  /// animation, use [jumpTo].
-  @override
-  Future<void> animateTo(
-    double offset, {
-    Duration duration = const Duration(milliseconds: 750),
-    Curve curve = Curves.decelerate,
-  }) {
-    return animateToIndexAndOffset(index: 0, offset: offset);
-  }
-
-  /// Same as [jumpTo] but will keep the current origin-index.
-  void jumpToWithSameOriginIndex(double offset) {
-    return super.jumpTo(offset);
-  }
-
-  /// Same as [animateTo] but will keep the current origin-index.
-  Future<void> animateToWithSameOriginIndex(
-    double offset, {
-    Duration duration = const Duration(milliseconds: 750),
-    Curve curve = Curves.decelerate,
-  }) {
-    return super.animateTo(offset, duration: duration, curve: curve);
-  }
-
-  /// Same as [jumpTo] but will move [offset] from the current position.
-  void jumpToRelative(double offset) {
-    return super.jumpTo(this.offset + offset);
-  }
-
-  /// Same as [animateTo] but will move [offset] from the current position.
-  Future<void> animateToRelative(
-    double offset, {
-    Duration duration = const Duration(milliseconds: 750),
-    Curve curve = Curves.decelerate,
-  }) {
-    return super.animateTo(this.offset + offset, duration: duration, curve: curve);
-  }
-
   @override
   void dispose() {
     _controllerGroup._allControllers.remove(this);
     super.dispose();
+  }
+
+  void indexChanged() {
+    notifyListeners();
   }
 
   @override
@@ -626,7 +575,6 @@ class IndexedScrollController extends ScrollController {
       debugLabel: debugLabel,
     );
   }
-
 
   @override
   _IndexedScrollPosition get position => super.position as _IndexedScrollPosition;
